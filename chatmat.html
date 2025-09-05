@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ChatMat</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: Arial; margin: 0; padding: 0; background: #ece5dd; }
+    #app { display: flex; height: 100vh; }
+    #contacts { width: 25%; background: #075e54; color: white; padding: 10px; box-sizing: border-box; }
+    #chat { flex: 1; display: flex; flex-direction: column; }
+    #messages { flex: 1; overflow-y: auto; padding: 10px; background: #f5f5f5; }
+    .msg { margin: 5px; padding: 8px 12px; border-radius: 10px; max-width: 60%; }
+    .me { background: #dcf8c6; margin-left: auto; }
+    .other { background: white; margin-right: auto; }
+    #inputArea { display: flex; padding: 10px; background: #eee; }
+    #inputArea input { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 5px; }
+    #inputArea button { margin-left: 5px; padding: 8px; border: none; border-radius: 5px; background: #25d366; color: white; }
+    #videoArea { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); justify-content: center; align-items: center; flex-direction: column; }
+    video { width: 40%; margin: 10px; border: 2px solid white; border-radius: 10px; }
+    #videoArea button { background: red; padding: 10px 20px; border-radius: 10px; color: white; border: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="contacts">
+      <h2>ChatMat</h2>
+      <input id="myName" placeholder="Your Name" /><br/>
+      <input id="myNumber" placeholder="Your Number" /><br/>
+      <button onclick="register()">Register</button>
+      <hr/>
+      <input id="contactNumber" placeholder="Contact Number" /><br/>
+      <button onclick="openChat()">Chat</button>
+    </div>
+
+    <div id="chat">
+      <div id="messages"></div>
+      <div id="inputArea">
+        <input id="msgBox" placeholder="Type message..." />
+        <button onclick="sendMessage()">Send</button>
+        <button onclick="startCall()">📞 Call</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="videoArea">
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
+    <button onclick="endCall()">End Call</button>
+  </div>
+
+  <script>
+    const socket = io();
+    let profile = {}, currentContact = null, chatHistory = {};
+    let pc, localStream;
+
+    function register() {
+      profile.name = document.getElementById("myName").value;
+      profile.number = document.getElementById("myNumber").value;
+      socket.emit("register", profile);
+      alert("Registered as " + profile.name);
+    }
+
+    function openChat() {
+      currentContact = document.getElementById("contactNumber").value;
+      loadMessages();
+    }
+
+    function loadMessages() {
+      let msgs = chatHistory[currentContact] || [];
+      let box = document.getElementById("messages");
+      box.innerHTML = "";
+      msgs.forEach(m => {
+        let div = document.createElement("div");
+        div.className = "msg " + (m.from === profile.number ? "me" : "other");
+        div.textContent = m.text;
+        box.appendChild(div);
+      });
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function sendMessage() {
+      if (!currentContact) return alert("Select contact first!");
+      let text = document.getElementById("msgBox").value;
+      if (!text) return;
+      let msg = { from: profile.number, to: currentContact, text };
+      socket.emit("message", msg);
+      if (!chatHistory[currentContact]) chatHistory[currentContact] = [];
+      chatHistory[currentContact].push(msg);
+      document.getElementById("msgBox").value = "";
+      loadMessages();
+    }
+
+    socket.on("message", (msg) => {
+      if (!chatHistory[msg.from]) chatHistory[msg.from] = [];
+      chatHistory[msg.from].push(msg);
+      if (currentContact === msg.from) loadMessages();
+    });
+
+    async function startCall() {
+      if (!currentContact) return alert("Select contact first!");
+      document.getElementById("videoArea").style.display = "flex";
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      document.getElementById("localVideo").srcObject = localStream;
+
+      pc = new RTCPeerConnection();
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      pc.ontrack = e => document.getElementById("remoteVideo").srcObject = e.streams[0];
+      pc.onicecandidate = e => {
+        if (e.candidate) socket.emit("candidate", { to: currentContact, candidate: e.candidate });
+      };
+
+      let offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit("call", { to: currentContact, offer });
+    }
+
+    socket.on("incomingCall", async (data) => {
+      let accept = confirm(`Incoming call from ${data.from.name}. Accept?`);
+      if (!accept) return;
+      document.getElementById("videoArea").style.display = "flex";
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      document.getElementById("localVideo").srcObject = localStream;
+
+      pc = new RTCPeerConnection();
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      pc.ontrack = e => document.getElementById("remoteVideo").srcObject = e.streams[0];
+      pc.onicecandidate = e => {
+        if (e.candidate) socket.emit("candidate", { to: data.from.number, candidate: e.candidate });
+      };
+
+      await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+      let answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit("answer", { to: data.from.number, answer });
+    });
+
+    socket.on("callAnswered", async (data) => {
+      await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+    });
+
+    socket.on("candidate", async (data) => {
+      if (pc) await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+    });
+
+    function endCall() {
+      document.getElementById("videoArea").style.display = "none";
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      if (pc) pc.close();
+    }
+  </script>
+</body>
+</html>
